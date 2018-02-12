@@ -1,0 +1,49 @@
+version: "2"
+services:
+    client:
+        container_name: client
+        build: .
+        cap_add:
+            - NET_ADMIN
+            - NET_RAW
+        networks:
+            client-net:
+                ipv4_address: 192.168.100.2
+
+    router:
+        container_name: router
+        build: .
+        cap_add:
+            - NET_ADMIN
+            - NET_RAW
+        networks:
+            client-net:
+                ipv4_address: 192.168.100.1
+            server-net:
+                ipv4_address: 192.168.101.1
+
+    server:
+        container_name: server
+        build: .
+        cap_add:
+            - NET_ADMIN
+            - NET_RAW
+        networks:
+            server-net:
+                ipv4_address: 192.168.101.2
+
+
+networks:
+    client-net:
+        ipam:
+            config:
+                - subnet: 192.168.100.0/24
+                  gateway: 192.168.100.200
+
+    server-net:
+        ipam:
+            config:
+                - subnet: 192.168.101.0/24
+                  gateway: 192.168.101.200
+
+
