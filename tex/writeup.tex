@@ -1,25 +1,141 @@
 \documentclass[12pt]{article}
+\usepackage{hyperref}
+
 
 \title{Literature Review}
 \author{Daniel Jones\\
   \small{University of Birmingham}\\
   \small{\texttt{dgj470@student.bham.ac.uk}}
 }
-\date{Feburary 12, 2018}
+\date{Febuary 12, 2018}
 
 \begin{document}
 
 \maketitle
 \tableofcontents
 \newpage
-\section{Preperation}
+\section{Preparation}
+When I started this assignment, I decided that I didn't want to mess around with creating vm's, so I thought I would build on my limited Docker experience.
+
+I think Docker was a better choice for this assignment, as I have complete control over what is running in each container, and it also conserves memory and CPU cycles \- which means that it can more easily be run on lower powered hardware.
+
+When deploying in Docker, you have to start with a Dockerfile, which contains instructions on how to build the container, with instructions such as which image to start with and I used an \texttt{ubuntu:16.04} image.
+
+I then installed all of the required programs \- as docker containers come very minimal.
+
+Setting up the networking etc, is done in a \texttt{docker-compose} file, which contains instructions on how to deploy the containers, and how to connect them together.
+
+I had some issues setting the networking up as required because a docker network is a bridge on the host. When you set the default gateway IP on the network, that is the ip address it gives the bridge on the host, which makes sense because normally you'd want to talk to the outside world. Even when removing the default gateway configuration, the gateway gets set to the first IP in the specified range. To get around this problem, I set the gateway to a high IP number, which I can then remove from the container at runtime.
+
+Once this was sorted, I then wrote some basic tests that I could run from the command line to check the connectivity between router, server and client with http on ports 80\-120, and ssh on port 22.
+
+I wrote the tests first, as it meant that when writing the rules I could easily test if they work.
+
+My script forms a '\texttt{one-click}' build, deploy, test and tear down, by executing:
+\begin{verbatim}sudo ./setup.sh\end{verbatim}
+All of the docker configuration and scripts are available at: \\
+\url{https://github.com/darkdan21/iptables-docker}\\
+Note, I haven't included any tcpdump or nmap output here because they don't add much to the report, but I've explained what I found and the differences before and after.
 
 \section{Default Permit}
-\section{Default Deny}
-\section{Router Firewalling}
-\section{BCP38 Ingress and Egress Control}
-\section{Logging}
-\section{Testing}
-\section{Closing Thoughts}
+Default permit was reasonably easy to implement and test \- it is a single iptables rule:
+\begin{verbatim}iptables -A INPUT -p tcp --dport 80 -j REJECT
+--reject-with tcp-reset\end{verbatim}
+In my opinion, the \texttt{REJECT --reject-with --tcp-reset} is incorrect, because it gives the remote host the information that there is actually a server there and listening and data can be derived from the response. However, it is easier to test a \texttt{REJECT}.
 
+To test this, I tested that SSH was still working, and that HTTP connections to port 80 were not. The tests passed, and are contained in the git repository linked to previously. 
+\section{Default Deny}
+This was slightly more difficult to implement and test, but still quite trivial, the iptables rules are as follows:
+\begin{verbatim}iptables -P INPUT DROP
+iptables -A INPUT -p TCP --dport 22 -j ACCEPT\end{verbatim}
+This adds default \texttt{DROP} to the \texttt{INPUT} chain, and then adds a single accept rule for connections on port 22.
+To test this, I connected to the Server from the Client via SSH, and then attempted to connect via HTTP on ports 80\texttt{-}120 (interval of 10).
+
+This was a successful test, as none of the HTTP requests got any response.
+\texttt{Nmap} confirmed this, and only shows a single port (22) as available.
+\newpage
+\section{Router Firewalling}
+To move the rules onto the router, slightly more complex things have to be done, as shown in the rules below:
+\begin{verbatim}iptables -P FORWARD DROP
+iptables -A FORWARD -i eth0 -o eth1 -p tcp --syn
+    --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate
+    ESTABLISHED,RELATED -j ACCEPT\end{verbatim}
+
+The first rule is the same as previous, however on the \texttt{FORWARD} chain, which controls whether packets are forwarded on to their destination by the kernel.
+
+The second rule, only allows syn packers to enter via \texttt{eth0}, and exit via \texttt{eth1} if they are going to destination port 22. The connection is then added to the connection tracking, which is used in the third rule to determine if the packets will be allowed through if they are not \texttt{SYN} packets going in either direction.
+
+To test this, I did the same tests as previous, checking if a variety of connections were accepted, and none of them were \- with the exception of SSH on port 22.
+This was confirmed by running nmap as follows: \begin{verbatim}nmap -p1-65535 192.168.101.2\end{verbatim}
+
+I also ran tcpdump on the bridges accessible to the host to confirm that only traffic on port 22 is let through the firewall, and it was.
+
+This showed me another benefit of running it in docker, I can use tcpdump on both sides of the router as though I am listening on the wire, which is more difficult to get right if it is being done on the hosts themselves.
+On the client side, I saw lots of nmap traffic, whereas on the server side, only the traffic on port 22 was able to enter the network.
+
+\section{BCP38 Ingress and Egress Control}
+I spent quite a long time experimenting with this, but I couldn't get broadcast traffic to propagate through the network with the firewall disabled \- for some reason it wasn't being routed, after doing some research, it seems that it is disabled in Linux for reasons of security, as it can be used as a method of \texttt{DOS}.
+Enabling broadcast traffic requires using another piece of software to forward the broadcasts across subdomains. I have actually experimented with this on my home network in the past in order to access Chromecasts on LAN and WIFI (as they were segmented out), but it was unreliable and in the end we decided to merge the LAN and WIFI subnets together to get rid of this problem.
+
+I did write some rules to drop all broadcast traffic however, but as I could not get it to work they are untested:\begin{verbatim}iptables -I FORWARD -m pkttype --pkt-type broadcast -j DROP
+iptables -I OUTPUT -m pkttype --pkt-type broadcast -j DROP
+iptables -I INPUT -m pkttype --pkt-type broadcast -j DROP\end{verbatim}
+
+Secondly, I decided that to maintain the \texttt{default drop} style of iptables, I would interpret this question in a different way of only allowing access from IP ranges that I know are safe with the following rules:
+\begin{verbatim}iptables -P FORWARD DROP
+iptables -A FORWARD -i eth0 -o eth1 -p tcp -d 192.168.101.0/24
+    -s 192.168.100.0/24 -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED
+    -j ACCEPT\end{verbatim}
+This is very similar code to the previous question, however it limits syn packets to only come from the client subnet and going to the server subnet.
+
+In order to allow the entire internet, it would be a large number of similar rules with different source IP addresses to only cover the allocated public IP space.
+I didn't think this was necessary because in the assignment we only have two small IP spaces.
+
+A more practical approach assuming this was going to be used in a production environment would be to use IPTables negation rules, but I'd prefer to whitelist rather than blacklist which in my opinion is a more sensible approach to network security.
+
+To test this, I ran some automatic tests, to access all of the services, and they were available, and I also spoofed the source address with netcat to locate the packets outside of the subnet.
+The packets never made it to the server, but I don't know if they were dropped because of the IPtables rules or because they were invalid packets based on the subnet mask.
+
+Using nmap, I nmap'd the server from the client, and as expected, everything was accessible.
+\section{Logging}
+The logging section was the only part where using docker made it more challenging, because docker cannot access the syslog and write to it, so I had to use a userspace logging daemon, \texttt{ulogd} and write to that.
+
+The iptables rules were as follows:
+\begin{verbatim}
+iptables -N MYLOGGING
+iptables -A MYLOGGING --match hashlimit
+    --hashlimit-name "MYLOGGING"
+    --hashlimit-upto 1/sec --hashlimit-mode srcip,dstport
+    --hashlimit-burst 1
+    -j NFLOG --nflog-prefix "IPTABLES-DROPPED: "
+
+iptables -A MYLOGGING -j DROP
+
+iptables -A FORWARD -i eth0 -o eth1 -p tcp --syn --dport 22
+    -m conntrack --ctstate NEW -j ACCEPT
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED
+    -j ACCEPT
+iptables -A FORWARD -j MYLOGGING
+\end{verbatim}
+In the forward chain, it does the same as in part4, except instead of dropping the packets, it sends them to the \texttt{mylogging} chain.
+Once in the logging chain it checks the packets against a '\texttt{hashlimit}' rule, which matches a maximum of once per second for each source ip and destination port pair. If it matches this, it logs it to the NFLOG daemon.
+
+To test this, I ran the same tests as in part 4, along with starting some more containers to add some more traffic and checking the log rate and it only generated one log entry/second for each source and port combination.
+
+Nmap was also used to verify that only port 22 was available.
+\section{Testing}
+For all of the testing, as I explained above, I used some testing scripts which would attempt to make an SSH connection, or wget a web page.
+As stated before, I haven't included any nmap outputs or tcpdump/wireshark captures in here, because the document is long enough already and I felt that they didn't add anything extra.
+\section{Closing Thoughts}
+Doing this exercise in Docker was a challenge, and I feel like it was more rewarding and easier to run tests on, as I could easily spin up containers and run automated tests to check the firewall rules from the command line.
+
+It may have affected how I performed some of the tasks, and the final part6.sh will not run on a normal system unless ulogd is installed, as I start it as part of the iptables script.
+
+The scripts will also not run in isolation, as they all use a \texttt{./reset.sh} at the start which resets iptables completely, the scripts as submitted will also not run with docker, as I was resetting them in a different way, they are just provided in the submission for completion.
+
+I'd like to experiment more with iptables, and researching for this assignment has given me a greater understanding of how the rules work, and in the future I will be looking at how NAT can be performed with them.
+
+It was also a very good opportunity to improve my Docker skills.
 \end{document}
